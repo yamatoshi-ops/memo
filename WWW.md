@@ -263,6 +263,94 @@ P0のような物理backboneへのフォールバックではありません。
 ---
 # 物理モデルFit
 
+はい、RBFを使用しています。正確には、磁束面をRBFだけで直接近似するのではなく、次の構成です。
+
+\[
+\hat{\psi}_{d,q}
+=
+\psi^{backbone}_{d,q}
++
+taper(r)\,
+RBF_{d,q}\left(\frac{I_d}{I_{base}},\frac{I_q}{I_{base}}\right)
+\]
+
+- 物理モデルで `psi_d`、`psi_q` のbackboneを近似
+- 選択点における「実データ − backbone」を残差とする
+- d軸残差、q軸残差を別々にRBF近似
+- RBFカーネルは `thin_plate_spline`
+- smoothingは第1報ではd/qともに `0.1` に固定
+- 外周ではRBF残差をtaperで減衰
+- `Iq=0`では最終的な `psi_q` を厳密に0へ置換
+
+見るべきファイルは、優先順に以下です。
+
+1. 実際の面近似実装
+
+[master_point_selection_contract.py:747](/Users/ochiba/newspace/life/factory/motor-control-ai/features/calibration/code_flux/master_point_selection_contract.py:747)
+
+`_fit_fixed_forward_model()` が中心です。特に以下でRBFを構築しています。
+
+```python
+d_rbf = RBFInterpolator(
+    points,
+    d_residual,
+    kernel="thin_plate_spline",
+    smoothing=config.psi_d_smoothing,
+)
+q_rbf = RBFInterpolator(
+    points,
+    q_residual,
+    kernel="thin_plate_spline",
+    smoothing=config.psi_q_smoothing,
+)
+```
+
+磁束面の評価式は [master_point_selection_contract.py:269](/Users/ochiba/newspace/life/factory/motor-control-ai/features/calibration/code_flux/master_point_selection_contract.py:269) です。
+
+2. 第1報の選点評価フロー
+
+[master_selection_sweep.py:762](/Users/ochiba/newspace/life/factory/motor-control-ai/features/calibration/code_flux/master_selection_sweep.py:762)
+
+ここで候補ごとの選択点を取り出し、
+
+```python
+model = _fit_fixed_forward_model(selected, s1_config)
+```
+
+として選択点だけから磁束面を再Fitし、holdout点の磁束・トルク誤差を評価しています。つまり、選点候補ごとにFit対象点は変わりますが、Fit方式とハイパーパラメータは同一です。
+
+3. backboneとproduction Fitの元実装
+
+[forward_fit.py:63](/Users/ochiba/newspace/life/factory/motor-control-ai/features/calibration/code_flux/forward_fit.py:63)
+
+- `psi_d_backbone()`
+- `psi_q_backbone()`
+- `_fit_backbones()`
+- `taper()`
+
+が定義されています。
+
+一般production処理でのthin-plate RBF実装は [forward_fit.py:194](/Users/ochiba/newspace/life/factory/motor-control-ai/features/calibration/code_flux/forward_fit.py:194) です。ただし、こちらはsmoothingをCVで選択します。第1報ではproductionで採用済みの値を固定して再現しているため、実際に追うべき中心は `master_point_selection_contract.py` です。
+
+4. 第1報の固定パラメータ
+
+[config.toml:42](/Users/ochiba/newspace/life/factory/motor-control-ai/features/calibration/simulation/run_cases/den_motor/den_master_point_selection/config.toml:42)
+
+```toml
+[forward_map.taper]
+r_in_A = 1074.0
+r_out_A = 1200.0
+
+[baseline]
+psi_d_smoothing = 0.1
+psi_q_smoothing = 0.1
+```
+
+なお、RBFは面近似方式です。選点ロジック自体はcoverage、局所二次近似による曲率、固定Fit残差などを使用しています。特に `skeleton_risk_residual` では、全600点による同じRBF Fitの残差が選点指標の一部にも使われています。結論として、第1報の面近似は「物理backbone＋独立thin-plate RBF残差」です。
+
+
+
+---
 「d/qの拘束」を分けて考える必要があります。
 
 第1報P0にも物理的な形状拘束はあります。しかし、第2報E1が導入する「d/q相反拘束」はありません。
